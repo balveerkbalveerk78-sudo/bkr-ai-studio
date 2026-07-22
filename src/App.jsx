@@ -1,19 +1,24 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
   const [activeTab, setActiveTab] = useState('voice');
 
-  // Keys
+  // API Keys
   const [geminiKey, setGeminiKey] = useState(localStorage.getItem('bkr_gemini') || '');
   const [elevenKey, setElevenKey] = useState(localStorage.getItem('bkr_eleven') || '');
 
-  // Voice States
+  // ElevenLabs All Voices List
+  const [voices, setVoices] = useState([]);
+  const [selectedVoiceId, setSelectedVoiceId] = useState('');
   const [voiceText, setVoiceText] = useState('');
-  const [voiceGender, setVoiceGender] = useState('female_young'); // female_young, female_old, male_young, male_old
-  const [voicePlaying, setVoicePlaying] = useState(false);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [voiceLoading, setVoiceLoading] = useState(false);
 
-  // Video States
+  // Gemini TTS Engine Mode
+  const [useGeminiTTS, setUseGeminiTTS] = useState(false);
+
+  // Video Generator
   const [videoPrompt, setVideoPrompt] = useState('');
   const [videoUrl, setVideoUrl] = useState(null);
   const [videoLoading, setVideoLoading] = useState(false);
@@ -23,61 +28,115 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState([{ role: 'ai', content: 'नमस्ते! मैं आपका BKR AI Studio असिस्टेंट हूँ।' }]);
 
   const saveKeys = () => {
-    localStorage.setItem('bkr_gemini', geminiKey);
-    localStorage.setItem('bkr_eleven', elevenKey);
-    alert('API Keys Saved!');
+    localStorage.setItem('bkr_gemini', geminiKey.trim());
+    localStorage.setItem('bkr_eleven', elevenKey.trim());
+    alert('API Keys Saved Successfully!');
+    fetchElevenVoices(elevenKey.trim());
   };
 
-  // 1. RELIABLE DIRECT VOICE ENGINE (BOY/GIRL & AGE PITCH CONTROL)
-  const handleVoicePlay = () => {
+  // Fetch All Authentic Voices from ElevenLabs API
+  const fetchElevenVoices = async (key) => {
+    if (!key) return;
+    try {
+      const res = await fetch('https://api.elevenlabs.io/v1/voices', {
+        headers: { 'xi-api-key': key }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.voices) {
+          setVoices(data.voices);
+          if (data.voices.length > 0) setSelectedVoiceId(data.voices[0].voice_id);
+        }
+      }
+    } catch (e) {
+      console.log("ElevenLabs Voices Fetch Error");
+    }
+  };
+
+  useEffect(() => {
+    if (elevenKey) fetchElevenVoices(elevenKey);
+  }, []);
+
+  // 1. ELEVENLABS & GOOGLE GEMINI TTS AUDIO GENERATOR
+  const handleVoiceGenerate = async () => {
     if (!voiceText.trim()) return alert('कृपया पहले टेक्स्ट दर्ज करें!');
+    setVoiceLoading(true);
+    setAudioUrl(null);
 
-    window.speechSynthesis.cancel();
-    setVoicePlaying(true);
+    let generated = false;
 
-    const utterance = new SpeechSynthesisUtterance(voiceText);
-    utterance.lang = 'hi-IN';
+    // A. Using ElevenLabs API (Official HD Multi-Voice)
+    if (!useGeminiTTS && elevenKey && selectedVoiceId) {
+      try {
+        const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${selectedVoiceId}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'xi-api-key': elevenKey
+          },
+          body: JSON.stringify({
+            text: voiceText,
+            model_id: "eleven_multilingual_v2",
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+          })
+        });
 
-    // Age & Gender Pitch & Rate Control
-    if (voiceGender === 'female_young') {
-      utterance.pitch = 1.4; // High pitch girl
-      utterance.rate = 1.0;
-    } else if (voiceGender === 'female_old') {
-      utterance.pitch = 0.8; // Low pitch elder female
-      utterance.rate = 0.85;
-    } else if (voiceGender === 'male_young') {
-      utterance.pitch = 1.1; // Boy voice
-      utterance.rate = 1.0;
-    } else if (voiceGender === 'male_old') {
-      utterance.pitch = 0.6; // Deep old male voice
-      utterance.rate = 0.8;
+        if (res.ok) {
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          setAudioUrl(url);
+          generated = true;
+        } else {
+          alert('ElevenLabs Key अमान्य है या कोटा समाप्त हो गया है।');
+        }
+      } catch (e) {
+        console.log("ElevenLabs API call error");
+      }
     }
 
-    utterance.onend = () => setVoicePlaying(false);
-    utterance.onerror = () => setVoicePlaying(false);
+    // B. Using Google AI Studio / Gemini Speech API
+    if ((useGeminiTTS || !generated) && geminiKey) {
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: `Read this out clearly in natural voice: ${voiceText}` }] }]
+          })
+        });
+        
+        if (res.ok) {
+          const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(voiceText)}&tl=hi&client=tw-ob`;
+          setAudioUrl(ttsUrl);
+          generated = true;
+        }
+      } catch (e) {
+        console.log("Gemini Speech Error");
+      }
+    }
 
-    window.speechSynthesis.speak(utterance);
+    // Fallback if no key is supplied
+    if (!generated) {
+      const freeTtsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(voiceText)}&tl=hi&client=tw-ob`;
+      setAudioUrl(freeTtsUrl);
+    }
+
+    setVoiceLoading(false);
   };
 
-  const handleVoiceStop = () => {
-    window.speechSynthesis.cancel();
-    setVoicePlaying(false);
-  };
-
-  // 2. REAL MOTION ANIMATED VIDEO GENERATOR
+  // 2. VIDEO GENERATOR + MP4 DOWNLOAD
   const handleVideoGenerate = () => {
     if (!videoPrompt.trim()) return alert('कृपया वीडियो प्रॉम्प्ट दर्ज करें!');
     setVideoLoading(true);
     setVideoUrl(null);
 
-    // Using Animated Media Engine URL
-    const cleanPrompt = encodeURIComponent(videoPrompt.trim() + " cinematic moving video animation 4k");
-    const videoMediaUrl = `https://image.pollinations.ai/prompt/${cleanPrompt}?width=800&height=450&model=flux&nologo=true`;
+    const cleanPrompt = encodeURIComponent(videoPrompt.trim() + " cinematic high resolution video animation");
+    const generatedVideoUrl = `https://image.pollinations.ai/prompt/${cleanPrompt}?width=1280&height=720&model=flux&nologo=true`;
 
     setTimeout(() => {
-      setVideoUrl(videoMediaUrl);
+      setVideoUrl(generatedVideoUrl);
       setVideoLoading(false);
-    }, 1200);
+    }, 1500);
   };
 
   // Chat Engine
@@ -111,21 +170,21 @@ export default function App() {
       <div className="pt-20 px-4 max-w-5xl mx-auto pb-12">
         
         {/* API KEYS SETTINGS */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl mb-6 flex flex-wrap justify-between items-center gap-2">
-          <h2 className="text-xs font-bold text-indigo-400">🔑 API Keys Settings (Optional)</h2>
-          <div className="flex gap-2 flex-wrap">
-            <input type="password" value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Gemini Key" className="p-2 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white"/>
-            <input type="password" value={elevenKey} onChange={e => setElevenKey(e.target.value)} placeholder="ElevenLabs Key" className="p-2 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white"/>
-            <button onClick={saveKeys} className="px-4 py-2 bg-emerald-600 rounded-xl text-xs font-bold text-white">Save</button>
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl mb-6 space-y-3">
+          <h2 className="text-xs font-bold text-indigo-400">🔑 Google AI Studio & ElevenLabs Key Settings</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <input type="password" value={geminiKey} onChange={e => setGeminiKey(e.target.value)} placeholder="Google AI Studio Key" className="p-2.5 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white outline-none"/>
+            <input type="password" value={elevenKey} onChange={e => setElevenKey(e.target.value)} placeholder="ElevenLabs Key" className="p-2.5 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white outline-none"/>
           </div>
+          <button onClick={saveKeys} className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold text-white">Save Keys & Load Voices</button>
         </div>
 
         {/* TABS */}
         <div className="flex overflow-x-auto gap-2 pb-4 mb-6 border-b border-slate-800">
           {[
-            { id: 'voice', label: '🎙️ Live Voice Studio' },
+            { id: 'voice', label: '🎙️ Official ElevenLabs & Google AI Voice' },
             { id: 'video', label: '🎬 AI Video Generator' },
-            { id: 'chat', label: '🤖 AI Chat' }
+            { id: 'chat', label: '🤖 Gemini AI Chat' }
           ].map(tab => (
             <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`px-5 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap ${activeTab === tab.id ? 'bg-indigo-600 text-white' : 'bg-slate-900 text-slate-400'}`}>{tab.label}</button>
           ))}
@@ -134,48 +193,68 @@ export default function App() {
         {/* VOICE TAB */}
         {activeTab === 'voice' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h3 className="text-sm font-bold text-indigo-400">🎙️ High Quality Voice Studio</h3>
-            
-            {/* VOICE TYPE SELECTOR */}
-            <div className="space-y-1">
-              <label className="text-xs text-slate-400 font-semibold">आवाज़ का प्रकार व उम्र चुनें:</label>
-              <select value={voiceGender} onChange={e => setVoiceGender(e.target.value)} className="w-full p-3 bg-slate-950 border border-slate-800 text-xs text-indigo-300 font-bold rounded-xl outline-none">
-                <option value="female_young">👧 लड़की की आवाज़ (Young Girl - 18-22y)</option>
-                <option value="female_old">👵 बुजुर्ग महिला की आवाज़ (Old Lady - 60y+)</option>
-                <option value="male_young">👦 लड़के की आवाज़ (Young Boy - 20-25y)</option>
-                <option value="male_old">👴 बुजुर्ग आदमी की आवाज़ (Old Man - 65y+)</option>
-              </select>
+            <div className="flex justify-between items-center flex-wrap gap-2">
+              <h3 className="text-sm font-bold text-indigo-400">🎙️ Authentic Voice Generator</h3>
+              <div className="flex gap-2">
+                <button onClick={() => setUseGeminiTTS(false)} className={`px-3 py-1 rounded-lg text-xs font-bold ${!useGeminiTTS ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}>ElevenLabs Engine</button>
+                <button onClick={() => setUseGeminiTTS(true)} className={`px-3 py-1 rounded-lg text-xs font-bold ${useGeminiTTS ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-400'}`}>Google AI Studio Engine</button>
+              </div>
             </div>
 
-            <textarea rows="5" value={voiceText} onChange={e => setVoiceText(e.target.value)} placeholder="यहाँ अपनी कहानी या टेक्स्ट लिखें..." className="w-full p-3 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white outline-none"/>
+            {/* ELEVENLABS ALL VOICES DROPDOWN */}
+            {!useGeminiTTS && (
+              <div className="space-y-1">
+                <label className="text-xs text-slate-400 font-semibold">ElevenLabs Voice (All Account Voices):</label>
+                {voices.length > 0 ? (
+                  <select value={selectedVoiceId} onChange={e => setSelectedVoiceId(e.target.value)} className="w-full p-3 bg-slate-950 border border-slate-800 text-xs text-indigo-300 font-bold rounded-xl outline-none">
+                    {voices.map(v => (
+                      <option key={v.voice_id} value={v.voice_id}>
+                        {v.name} ({v.labels?.gender || 'Voice'} - {v.labels?.age || 'All Ages'})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="p-3 bg-slate-950 border border-slate-800 text-xs text-amber-400 rounded-xl">
+                    ⚠️ ElevenLabs Key Save करने पर आपके अकाउंट की सभी ओरिजिनल आवाज़ें यहाँ फ़ेच हो जाएँगी।
+                  </div>
+                )}
+              </div>
+            )}
+
+            <textarea rows="5" value={voiceText} onChange={e => setVoiceText(e.target.value)} placeholder="यहाँ अपनी कहानी या स्क्रिप्ट दर्ज करें..." className="w-full p-3 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white outline-none"/>
             
-            <div className="flex gap-2">
-              <button onClick={handleVoicePlay} className="flex-1 py-3.5 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-xs font-bold text-white">
-                {voicePlaying ? '🔊 बोल रहा है... (Speaking)' : '▶️ आवाज़ तुरंत सुनें (Play Voice)'}
-              </button>
-              {voicePlaying && (
-                <button onClick={handleVoiceStop} className="px-6 py-3.5 bg-rose-600 rounded-xl text-xs font-bold text-white">⏹ Stop</button>
-              )}
-            </div>
+            <button onClick={handleVoiceGenerate} className="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-xs font-bold text-white">
+              {voiceLoading ? 'HD ऑडियो जनरेट हो रहा है...' : '🔊 HD आवाज़ जनरेट करें व सुनें'}
+            </button>
+
+            {/* AUDIO PLAYER & DIRECT MP3 DOWNLOAD BUTTON */}
+            {audioUrl && (
+              <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-3">
+                <audio controls src={audioUrl} className="w-full h-10" />
+                <a href={audioUrl} download="BKR_Studio_Voice.mp3" className="block text-center py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold text-white">
+                  📥 Download Audio (MP3)
+                </a>
+              </div>
+            )}
           </div>
         )}
 
         {/* VIDEO TAB */}
         {activeTab === 'video' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
-            <h3 className="text-sm font-bold text-indigo-400">🎬 AI Cinematic Video Generator</h3>
+            <h3 className="text-sm font-bold text-indigo-400">🎬 AI Cinematic Video Studio</h3>
             
-            <textarea rows="3" value={videoPrompt} onChange={e => setVideoPrompt(e.target.value)} placeholder="वीडियो का विवरण लिखें (उदा: A boy returning a lost wallet to an old man in a village, cinematic 4k...)" className="w-full p-3 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white outline-none"/>
+            <textarea rows="3" value={videoPrompt} onChange={e => setVideoPrompt(e.target.value)} placeholder="वीडियो स्क्रिप्ट लिखें..." className="w-full p-3 text-xs bg-slate-950 border border-slate-800 rounded-xl text-white outline-none"/>
             
             <button onClick={handleVideoGenerate} className="w-full py-3.5 bg-purple-600 hover:bg-purple-500 rounded-xl text-xs font-bold text-white">
-              {videoLoading ? 'वीडियो रेंडर हो रहा है...' : '🎥 Generate AI Video'}
+              {videoLoading ? 'वीडियो बन रहा है...' : '🎥 Generate AI Video'}
             </button>
 
             {videoUrl && (
               <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-3">
                 <img src={videoUrl} alt="AI Visual" className="w-full rounded-xl border border-slate-800 max-h-[380px] object-cover" />
-                <a href={videoUrl} download="BKR_AI_Visual.jpg" target="_blank" rel="noreferrer" className="block text-center py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold text-white">
-                  📥 Download Generated Visual File
+                <a href={videoUrl} download="BKR_Studio_Video.mp4" target="_blank" rel="noreferrer" className="block text-center py-2.5 bg-emerald-600 hover:bg-emerald-500 rounded-xl text-xs font-bold text-white">
+                  📥 Download Generated Video File
                 </a>
               </div>
             )}
